@@ -233,8 +233,11 @@ def _merge_accounts(base_accounts: list[dict], individual_accounts: list[dict]) 
 		suffix = env_key[len('ANYROUTER_ACCOUNT_') :] if env_key.startswith('ANYROUTER_ACCOUNT_') else ''
 
 		matched_idx = None
+		# Split suffix by '_' and check if api_user appears as an exact segment
+		# e.g. suffix="760_COMPUTETOKEN" splits to ["760","COMPUTETOKEN"]
+		suffix_parts = suffix.split('_') if suffix else []
 		for api_user_val, idx in api_user_index.items():
-			if api_user_val in suffix:
+			if api_user_val in suffix_parts:
 				matched_idx = idx
 				break
 

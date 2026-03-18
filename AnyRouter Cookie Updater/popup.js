@@ -10,6 +10,7 @@ const PROVIDER_DOMAINS = {
   xingyungept:  'https://ai.xingyungept.cn',
   sorai:        'https://newapi.sorai.me',
   apikey:       'https://welfare.apikey.cc',
+  computetoken: 'https://computetoken.ai',
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
