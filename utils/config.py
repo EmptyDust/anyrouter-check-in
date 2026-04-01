@@ -19,8 +19,9 @@ class ProviderConfig:
 	sign_in_path: str | None = '/api/user/sign_in'
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
-	bypass_method: Literal['waf_cookies', 'playwright'] | None = None
+	bypass_method: Literal['waf_cookies', 'playwright', 'turnstile_browser'] | None = None
 	waf_cookie_names: List[str] | None = None
+	checkin_page_path: str | None = None
 
 	def __post_init__(self):
 		self.domain = self.domain.rstrip('/')
@@ -57,6 +58,7 @@ class ProviderConfig:
 			api_user_key=data.get('api_user_key', 'new-api-user'),
 			bypass_method=data.get('bypass_method'),
 			waf_cookie_names=data.get('waf_cookie_names'),
+			checkin_page_path=data.get('checkin_page_path'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -70,6 +72,10 @@ class ProviderConfig:
 	def needs_manual_check_in(self) -> bool:
 		"""判断是否需要手动调用签到接口"""
 		return self.sign_in_path is not None
+
+	def needs_browser_checkin(self) -> bool:
+		"""判断是否需要通过浏览器交互完成签到（含 Turnstile 验证）"""
+		return self.bypass_method == 'turnstile_browser'
 
 
 @dataclass
@@ -101,6 +107,16 @@ class AppConfig:
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc'],
+			),
+			'heibai': ProviderConfig(
+				name='heibai',
+				domain='https://cdk.hybgzs.com',
+				login_path='/login',
+				sign_in_path=None,  # 通过浏览器交互签到，非 API
+				user_info_path='/api/wallet/balance',
+				api_user_key='',  # Session-based auth, no api_user header
+				bypass_method='turnstile_browser',
+				checkin_page_path='/gas-station/checkin',
 			),
 		}
 
@@ -165,7 +181,7 @@ class AccountConfig:
 	"""账号配置"""
 
 	cookies: dict | str
-	api_user: str
+	api_user: str = ''
 	provider: str = 'anyrouter'
 	name: str | None = None
 	domain: str | None = None  # optional: injected by plugin for unknown providers
@@ -179,7 +195,7 @@ class AccountConfig:
 
 		return cls(
 			cookies=data['cookies'],
-			api_user=data['api_user'],
+			api_user=data.get('api_user', ''),
 			provider=provider,
 			name=name if name else None,
 			domain=domain,
@@ -264,8 +280,8 @@ def _validate_account_dict(account_dict: dict, index: int) -> bool:
 	if not isinstance(account_dict, dict):
 		print(f'ERROR: Account {index + 1} configuration format is incorrect')
 		return False
-	if 'cookies' not in account_dict or 'api_user' not in account_dict:
-		print(f'ERROR: Account {index + 1} missing required fields (cookies, api_user)')
+	if 'cookies' not in account_dict:
+		print(f'ERROR: Account {index + 1} missing required field (cookies)')
 		return False
 	if 'name' in account_dict and not account_dict['name']:
 		print(f'ERROR: Account {index + 1} name field cannot be empty')
@@ -317,15 +333,19 @@ def load_accounts_config() -> list[AccountConfig] | None:
 
 	# Use (api_user, provider) as the dedup key so the same user ID on different
 	# platforms is not incorrectly collapsed into one account.
+	# For providers without api_user (session-based), use name as fallback key.
 	seen_keys: set[tuple[str, str]] = set()
 	unique_accounts = []
-	for acct in accounts:
-		key = (acct.api_user, acct.provider)
+	for i, acct in enumerate(accounts):
+		dedup_id = acct.api_user or acct.name or f'account_{i}'
+		key = (dedup_id, acct.provider)
 		if key not in seen_keys:
 			seen_keys.add(key)
 			unique_accounts.append(acct)
 		else:
-			print(f'[WARNING] Duplicate (api_user, provider) "{acct.api_user}/{acct.provider}" detected, keeping first occurrence')
+			print(
+				f'[WARNING] Duplicate (api_user, provider) "{dedup_id}/{acct.provider}" detected, keeping first occurrence'
+			)
 
 	print(f'[INFO] Loaded {len(unique_accounts)} account(s) total')
 	return unique_accounts

@@ -10,11 +10,11 @@ import os
 import sys
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
-from urllib.parse import urlparse
 
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
@@ -156,7 +156,11 @@ def get_user_info(client, headers, user_info_url: str):
 				}
 		# 检测 Cloudflare 拦截（TLS 指纹不匹配导致 httpx 被 403）
 		if response.status_code == 403 and _is_cloudflare_response(response):
-			return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}', 'cloudflare': True}
+			return {
+				'success': False,
+				'error': f'Failed to get user info: HTTP {response.status_code}',
+				'cloudflare': True,
+			}
 		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
@@ -246,7 +250,9 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 			# 5xx 服务端错误可重试
 			if response.status_code >= 500 and attempt < MAX_RETRIES:
-				print(f'[RETRY] {account_name}: HTTP {response.status_code}, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+				print(
+					f'[RETRY] {account_name}: HTTP {response.status_code}, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})'
+				)
 				time.sleep(RETRY_DELAY)
 				continue
 
@@ -256,7 +262,9 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 		except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, OSError) as e:
 			last_error = e
 			if attempt < MAX_RETRIES:
-				print(f'[RETRY] {account_name}: {type(e).__name__}, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+				print(
+					f'[RETRY] {account_name}: {type(e).__name__}, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})'
+				)
 				time.sleep(RETRY_DELAY)
 				continue
 			raise
@@ -340,7 +348,22 @@ PLAYWRIGHT_BROWSER_ARGS = [
 	'--no-sandbox',
 ]
 
-PLAYWRIGHT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+PLAYWRIGHT_USER_AGENT = (
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+)
+
+# CDP screenX/screenY patch: Chromium's Input.dispatchMouseEvent sets screenX=x, screenY=y
+# (client coords), but real mouse events have screen offsets. Turnstile detects this difference.
+CDP_MOUSE_PATCH_JS = """
+(() => {
+    if (window.__cdpMousePatched) return;
+    const rX = () => 800 + Math.floor(Math.random() * 400);
+    const rY = () => 400 + Math.floor(Math.random() * 200);
+    Object.defineProperty(MouseEvent.prototype, 'screenX', { get: rX });
+    Object.defineProperty(MouseEvent.prototype, 'screenY', { get: rY });
+    window.__cdpMousePatched = true;
+})();
+"""
 
 
 def _parse_user_info_json(data: dict) -> dict:
@@ -355,11 +378,13 @@ def _parse_user_info_json(data: dict) -> dict:
 			'used_quota': used_quota,
 			'display': f'💰 Current balance: ${quota}, Used: ${used_quota}',
 		}
-	return {'success': False, 'error': f'API returned success=false'}
+	return {'success': False, 'error': 'API returned success=false'}
 
 
 async def check_in_with_playwright(
-	account: AccountConfig, account_name: str, provider_config,
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
 ):
 	"""通过 Playwright 浏览器内 fetch 执行签到（绕过 Cloudflare TLS 指纹校验）"""
 	user_cookies = parse_cookies(account.cookies)
@@ -385,12 +410,16 @@ async def check_in_with_playwright(
 				# 注入 session cookie
 				hostname = urlparse(provider_config.domain).hostname
 				for name, value in user_cookies.items():
-					await context.add_cookies([{
-						'name': name,
-						'value': value,
-						'domain': hostname,
-						'path': '/',
-					}])
+					await context.add_cookies(
+						[
+							{
+								'name': name,
+								'value': value,
+								'domain': hostname,
+								'path': '/',
+							}
+						]
+					)
 
 				page = await context.new_page()
 
@@ -410,13 +439,13 @@ async def check_in_with_playwright(
 				user_info_before = None
 				for attempt in range(1, MAX_RETRIES + 1):
 					result = await page.evaluate(
-						'''async ([path, key, user]) => {
+						"""async ([path, key, user]) => {
 							try {
 								const r = await fetch(path, {headers: {[key]: user}});
 								if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
 								return await r.json();
 							} catch(e) { return {success: false, error: e.message}; }
-						}''',
+						}""",
 						[provider_config.user_info_path, api_user_key, api_user],
 					)
 					parsed = _parse_user_info_json(result) if result.get('success') else result
@@ -425,7 +454,9 @@ async def check_in_with_playwright(
 						print(user_info_before['display'])
 						break
 					if attempt < MAX_RETRIES:
-						print(f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+						print(
+							f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})'
+						)
 						await page.wait_for_timeout(RETRY_DELAY * 1000)
 					else:
 						user_info_before = parsed
@@ -437,7 +468,7 @@ async def check_in_with_playwright(
 					sign_in_path = provider_config.sign_in_path
 					print(f'[NETWORK] {account_name}: Executing check-in via browser fetch')
 					checkin_result = await page.evaluate(
-						'''async ([path, fallbackPath, key, user]) => {
+						"""async ([path, fallbackPath, key, user]) => {
 							const headers = {
 								'Content-Type': 'application/json',
 								'X-Requested-With': 'XMLHttpRequest',
@@ -453,7 +484,7 @@ async def check_in_with_playwright(
 								try { body = await r.json(); } catch(e) { body = {_raw: await r.text()}; }
 								return {status, body};
 							} catch(e) { return {status: 0, body: {error: e.message}}; }
-						}''',
+						}""",
 						[sign_in_path, NEW_API_CHECKIN_PATH, api_user_key, api_user],
 					)
 					status = checkin_result.get('status', 0)
@@ -466,7 +497,13 @@ async def check_in_with_playwright(
 							success = True
 						else:
 							error_msg = body.get('msg', body.get('message', 'Unknown error'))
-							already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+							already_checked_keywords = [
+								'已经签到',
+								'已签到',
+								'重复签到',
+								'already checked',
+								'already signed',
+							]
 							if any(kw in str(error_msg).lower() for kw in already_checked_keywords):
 								print(f'[SUCCESS] {account_name}: Already checked in today')
 								success = True
@@ -480,13 +517,13 @@ async def check_in_with_playwright(
 
 				# 获取签到后用户信息
 				result_after = await page.evaluate(
-					'''async ([path, key, user]) => {
+					"""async ([path, key, user]) => {
 						try {
 							const r = await fetch(path, {headers: {[key]: user}});
 							if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
 							return await r.json();
 						} catch(e) { return {success: false, error: e.message}; }
-					}''',
+					}""",
 					[provider_config.user_info_path, api_user_key, api_user],
 				)
 				user_info_after = _parse_user_info_json(result_after) if result_after.get('success') else result_after
@@ -496,6 +533,189 @@ async def check_in_with_playwright(
 
 			except Exception as e:
 				print(f'[FAILED] {account_name}: Playwright check-in error - {str(e)[:100]}')
+				await context.close()
+				return False, None, None
+
+
+async def _solve_turnstile(page, account_name: str) -> bool:
+	"""查找并解决 Cloudflare Turnstile 验证"""
+	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification...')
+
+	for attempt in range(15):
+		for frame in page.frames:
+			if 'challenges.cloudflare.com' not in frame.url:
+				continue
+			print(f'[INFO] {account_name}: Found Turnstile iframe, clicking checkbox...')
+			try:
+				result = await frame.evaluate("""() => {
+					const body = document.body;
+					if (body && body.shadowRoot) {
+						const inp = body.shadowRoot.querySelector('input');
+						if (inp) { inp.click(); return 'clicked_shadow'; }
+					}
+					const inp = document.querySelector('input[type="checkbox"]');
+					if (inp) { inp.click(); return 'clicked_direct'; }
+					const allInputs = document.querySelectorAll('input');
+					if (allInputs.length > 0) { allInputs[0].click(); return 'clicked_first'; }
+					return 'no_element';
+				}""")
+				print(f'[INFO] {account_name}: Turnstile click result: {result}')
+				if result.startswith('clicked'):
+					await page.wait_for_timeout(5000)
+					return True
+			except Exception as e:
+				print(f'[WARN] {account_name}: Turnstile click error: {e}')
+		await page.wait_for_timeout(1000)
+
+	print(f'[FAILED] {account_name}: Turnstile iframe not found after 15 seconds')
+	return False
+
+
+async def _get_wallet_balance(page, account_name: str, domain: str) -> dict:
+	"""通过 /api/wallet/balance 获取黑白站余额"""
+	try:
+		result = await page.evaluate(
+			"""async (domain) => {
+				try {
+					const r = await fetch(domain + '/api/wallet/balance', {credentials: 'include'});
+					if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
+					return await r.json();
+				} catch(e) { return {success: false, error: e.message}; }
+			}""",
+			domain,
+		)
+		if result.get('success') and result.get('data'):
+			total = result['data'].get('total', 0)
+			quota = round(total / 500000, 2)
+			return {
+				'success': True,
+				'quota': quota,
+				'used_quota': 0,
+				'display': f'💰 Current balance: ${quota}',
+			}
+		return {'success': False, 'error': result.get('error', 'Unknown error')}
+	except Exception as e:
+		return {'success': False, 'error': f'Failed to get balance: {str(e)[:50]}'}
+
+
+async def check_in_with_turnstile_browser(
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+):
+	"""通过 Playwright 浏览器执行签到（含 Cloudflare Turnstile 验证）
+
+	适用于非 NewAPI/OneAPI 格式的自定义签到站点（如黑白站）。
+	流程：导航到签到页 -> 获取余额 -> 点击签到按钮 -> 解决 Turnstile -> 等待完成 -> 获取更新余额
+	"""
+	user_cookies = parse_cookies(account.cookies)
+	if not user_cookies:
+		print(f'[FAILED] {account_name}: Invalid configuration format')
+		return False, None, None
+
+	print(f'[INFO] {account_name}: Using Playwright browser with Turnstile bypass')
+
+	async with async_playwright() as p:
+		import tempfile
+
+		with tempfile.TemporaryDirectory() as temp_dir:
+			context = await p.chromium.launch_persistent_context(
+				user_data_dir=temp_dir,
+				headless=False,
+				user_agent=PLAYWRIGHT_USER_AGENT,
+				viewport={'width': 1280, 'height': 900},
+				args=PLAYWRIGHT_BROWSER_ARGS,
+			)
+
+			try:
+				# 注入 session cookies（__Host- 和 __Secure- 前缀需要 secure=True）
+				hostname = urlparse(provider_config.domain).hostname
+				for name, value in user_cookies.items():
+					await context.add_cookies(
+						[
+							{
+								'name': name,
+								'value': value,
+								'domain': hostname,
+								'path': '/',
+								'secure': True,
+							}
+						]
+					)
+
+				page = await context.new_page()
+				await page.add_init_script(CDP_MOUSE_PATCH_JS)
+
+				# 导航到签到页面
+				checkin_url = f'{provider_config.domain}{provider_config.checkin_page_path}'
+				print(f'[PROCESSING] {account_name}: Navigating to check-in page...')
+				try:
+					await page.goto(checkin_url, wait_until='domcontentloaded', timeout=30000)
+				except Exception:
+					pass  # networkidle 可能超时，页面已加载即可
+				await page.wait_for_timeout(3000)
+
+				# 检查是否被重定向到登录页面（session 过期）
+				if '/login' in page.url or '/auth/signin' in page.url:
+					print(f'[FAILED] {account_name}: Session expired - redirected to login')
+					await context.close()
+					return False, None, None
+
+				# 获取签到前余额
+				user_info_before = await _get_wallet_balance(page, account_name, provider_config.domain)
+				if user_info_before.get('success'):
+					print(user_info_before['display'])
+
+				# 检查是否已签到
+				already_signed = page.locator('text=今日已签到')
+				checkin_btn = page.locator('button:has-text("立即签到")')
+
+				if await already_signed.count() > 0:
+					print(f'[SUCCESS] {account_name}: Already checked in today')
+					await context.close()
+					return True, user_info_before, user_info_before
+
+				if await checkin_btn.count() == 0:
+					print(f'[FAILED] {account_name}: Check-in button not found on page')
+					await context.close()
+					return False, user_info_before, None
+
+				# 点击签到按钮
+				print(f'[PROCESSING] {account_name}: Clicking check-in button...')
+				await checkin_btn.click()
+				await page.wait_for_timeout(2000)
+
+				# 解决 Turnstile 验证
+				turnstile_solved = await _solve_turnstile(page, account_name)
+				if not turnstile_solved:
+					print(f'[FAILED] {account_name}: Failed to solve Turnstile verification')
+					await context.close()
+					return False, user_info_before, None
+
+				# 等待签到完成
+				print(f'[PROCESSING] {account_name}: Waiting for check-in completion...')
+				success = False
+				try:
+					await page.wait_for_selector('text=今日已签到', timeout=15000)
+					print(f'[SUCCESS] {account_name}: Check-in successful!')
+					success = True
+				except Exception:
+					body_text = await page.locator('body').inner_text()
+					if '今日已签到' in body_text or '签到成功' in body_text:
+						print(f'[SUCCESS] {account_name}: Check-in successful!')
+						success = True
+					else:
+						print(f'[FAILED] {account_name}: Check-in result unclear')
+
+				# 等待余额更新
+				await page.wait_for_timeout(2000)
+				user_info_after = await _get_wallet_balance(page, account_name, provider_config.domain)
+
+				await context.close()
+				return success, user_info_before, user_info_after
+
+			except Exception as e:
+				print(f'[FAILED] {account_name}: Turnstile browser check-in error - {str(e)[:100]}')
 				await context.close()
 				return False, None, None
 
@@ -511,6 +731,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	# 自定义浏览器签到（含 Turnstile 验证，如黑白站）
+	if provider_config.needs_browser_checkin():
+		return await check_in_with_turnstile_browser(account, account_name, provider_config)
 
 	# Cloudflare 防护站点：通过 Playwright 浏览器内 fetch 执行所有请求
 	if provider_config.needs_playwright():
@@ -559,7 +783,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 				client.close()
 				return await check_in_with_playwright(account, account_name, provider_config)
 			if attempt < MAX_RETRIES:
-				print(f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})')
+				print(
+					f'[RETRY] {account_name}: Failed to get user info, retrying in {RETRY_DELAY}s ({attempt}/{MAX_RETRIES})'
+				)
 				time.sleep(RETRY_DELAY)
 			elif user_info_before:
 				print(user_info_before.get('error', 'Unknown error'))

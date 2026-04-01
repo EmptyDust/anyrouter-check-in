@@ -12,6 +12,7 @@
 // @match        https://ai.xingyungept.cn/*
 // @match        https://newapi.sorai.me/*
 // @match        https://welfare.apikey.cc/*
+// @match        https://cdk.hybgzs.com/*
 //
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -274,7 +275,7 @@
   // ──────────────────────────────────────────────
   //  Known built-in providers (excluded from PROVIDERS secret — already hardcoded in checkin.py)
   // ──────────────────────────────────────────────
-  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
+  const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'heibai']);
 
   // Key for storing locally-tracked custom providers (provider_name -> domain)
   const CUSTOM_PROVIDERS_KEY = 'anyrouter_cookie_updater_custom_providers';
@@ -356,6 +357,11 @@
     const label = env_key_suffix || domain;
 
     try {
+      // Special handling: heibai multi-cookie provider
+      if (isHeibaiProvider(domain)) {
+        return await syncHeibaiAccount(cfg, account);
+      }
+
       log.info(`Extracting cookie "${targetCookieName}" for ${label}`, {
         domain,
         on_target_site: location.origin === new URL(domain).origin,
@@ -448,6 +454,7 @@
     sorai:        'https://newapi.sorai.me',
     apikey:       'https://welfare.apikey.cc',
     computetoken: 'https://computetoken.ai',
+    heibai:       'https://cdk.hybgzs.com',
   };
 
   // Reverse map: domain → PROVIDER tag for secret naming (known sites)
@@ -459,7 +466,103 @@
     'https://newapi.sorai.me':     'SORAI',
     'https://welfare.apikey.cc':   'APIKEY',
     'https://computetoken.ai':     'COMPUTETOKEN',
+    'https://cdk.hybgzs.com':     'HEIBAI',
   };
+
+  // ── Heibai (黑白站) multi-cookie provider ──
+  const HEIBAI_COOKIE_NAMES = [
+    'server_name_session',
+    '__Host-authjs.csrf-token',
+    '__Secure-authjs.callback-url',
+    '__Secure-nw-uid',
+    '__Secure-authjs.session-token',
+  ];
+
+  function isHeibaiProvider(domain) {
+    return getProviderName(domain) === 'heibai';
+  }
+
+  async function getHeibaiCookies(domain) {
+    const cookies = {};
+    for (const name of HEIBAI_COOKIE_NAMES) {
+      const value = await getCookieValue(domain, name);
+      if (value) cookies[name] = value;
+    }
+    return cookies;
+  }
+
+  function fetchHeibaiUser(domain, cookies) {
+    // Strategy 1: use __Secure-nw-uid cookie
+    if (cookies['__Secure-nw-uid']) return Promise.resolve(cookies['__Secure-nw-uid']);
+
+    // Strategy 2: call /api/auth/session
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: `${domain.replace(/\/$/, '')}/api/auth/session`,
+        headers: { 'Accept': 'application/json' },
+        anonymous: false,
+        onload(resp) {
+          try {
+            const data = JSON.parse(resp.responseText);
+            resolve(data?.user?.name || data?.user?.id || null);
+          } catch { resolve(null); }
+        },
+        onerror() { resolve(null); }
+      });
+    });
+  }
+
+  async function syncHeibaiAccount(cfg, account) {
+    const { domain } = account;
+    const label = account.env_key_suffix || domain;
+
+    try {
+      log.info(`Heibai: extracting cookies for ${label}`);
+      const cookies = await getHeibaiCookies(domain);
+
+      if (!cookies['__Secure-authjs.session-token']) {
+        log.error(`Heibai: session cookie not found for ${label}`, {
+          found: Object.keys(cookies),
+          hint: '请先在浏览器中登录 cdk.hybgzs.com',
+        });
+        return { success: false, label, error: 'session cookie not found' };
+      }
+
+      const foundCount = Object.keys(cookies).length;
+      log.success(`Heibai: extracted ${foundCount}/${HEIBAI_COOKIE_NAMES.length} cookies`);
+
+      const userId = await fetchHeibaiUser(domain, cookies);
+      if (!userId) {
+        log.error(`Heibai: cannot resolve user identity for ${label}`);
+        return { success: false, label, error: 'cannot resolve user identity' };
+      }
+      log.success(`Heibai: resolved user: ${userId}`);
+
+      let { env_key_suffix } = account;
+      if (!env_key_suffix) {
+        const sanitized = userId.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30);
+        env_key_suffix = `${sanitized}_HEIBAI`;
+        log.info(`Heibai: auto-generated env_key_suffix: ${env_key_suffix}`);
+      }
+
+      const secretName = `ANYROUTER_ACCOUNT_${env_key_suffix}`;
+      const secretValue = JSON.stringify({
+        cookies,
+        provider: 'heibai',
+        name: `黑白站-${userId}`,
+        domain: domain.replace(/\/$/, ''),
+      });
+
+      log.info(`Pushing to GitHub secret: ${secretName}`);
+      await putSecret(cfg, secretName, secretValue);
+      log.success(`✅ ${secretName} updated`);
+      return { success: true, label, secretName };
+    } catch (e) {
+      log.error(`Heibai sync failed for ${label}`, { error: e.message });
+      return { success: false, label, error: e.message };
+    }
+  }
 
   // Derive a provider tag for any domain (known or unknown)
   function getProviderTag(domain) {
@@ -480,8 +583,11 @@
 
   function convertFromAnyRouterAccounts(items) {
     return items.map(item => {
-      const sessionCookie = item?.cookies?.session;
-      if (!sessionCookie) return null;
+      if (!item?.cookies) return null;
+      // Accept NewAPI single-cookie format or heibai multi-cookie format
+      const hasSession = !!item.cookies.session;
+      const hasHeibai = !!item.cookies['__Secure-authjs.session-token'];
+      if (!hasSession && !hasHeibai) return null;
       const provider = item.provider || 'anyrouter';
       // Use the domain directly from the item if present, otherwise look up from known map
       const domain = item.domain || PROVIDER_DOMAINS[provider] || null;
@@ -825,10 +931,13 @@
     const idx = list.children.length + 1;
     const item = document.createElement('div');
     item.className = 'arc-item';
-    const cookieNameVal = esc(data.cookie_name || 'session');
+    const isHeibai = (data.domain || '').includes('cdk.hybgzs.com');
+    const cookieNameVal = isHeibai ? '(多cookie自动提取)' : esc(data.cookie_name || 'session');
+    const cookieDisabled = isHeibai ? 'disabled' : '';
+    const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
     item.innerHTML = `
       <div class="arc-item-hdr">
-        <span class="arc-item-lbl">账号 ${idx}</span>
+        <span class="arc-item-lbl">账号 ${idx}${isHeibai ? ' (黑白站)' : ''}</span>
         <button class="arc-del" title="删除">✕</button>
       </div>
       <div class="arc-row">
@@ -838,13 +947,13 @@
         </div>
         <div class="arc-field">
           <label>cookie_name</label>
-          <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}">
+          <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}" ${cookieDisabled}>
         </div>
       </div>
       <div class="arc-row">
         <div class="arc-field">
           <label>api_user <span style="font-weight:400;color:#8b949e;font-style:italic">自动解析</span></label>
-          <input type="text" class="f-api_user" placeholder="留空则同步时自动获取" value="${esc(data.api_user || '')}">
+          <input type="text" class="f-api_user" placeholder="${apiUserPlaceholder}" value="${esc(data.api_user || '')}">
         </div>
         <div class="arc-field">
           <label>env_key_suffix <span style="font-weight:400;color:#8b949e;font-style:italic">自动生成</span></label>

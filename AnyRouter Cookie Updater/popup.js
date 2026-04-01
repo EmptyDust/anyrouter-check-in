@@ -11,6 +11,7 @@ const PROVIDER_DOMAINS = {
   sorai:        'https://newapi.sorai.me',
   apikey:       'https://welfare.apikey.cc',
   computetoken: 'https://computetoken.ai',
+  heibai:       'https://cdk.hybgzs.com',
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -106,10 +107,13 @@ function addAccountItem(data = {}) {
   const item = document.createElement('div');
   item.className = 'account-item';
   // cookie_name defaults to 'session', no extra label text needed
-  const cookieNameVal = esc(data.cookie_name || 'session');
+  const isHeibai = (data.domain || '').includes('cdk.hybgzs.com');
+  const cookieNameVal = isHeibai ? '(多cookie自动提取)' : esc(data.cookie_name || 'session');
+  const cookieDisabled = isHeibai ? 'disabled' : '';
+  const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
   item.innerHTML = `
     <div class="account-item-header">
-      <span class="account-item-label">账号 ${idx}</span>
+      <span class="account-item-label">账号 ${idx}${isHeibai ? ' (黑白站)' : ''}</span>
       <button class="account-item-del" title="删除" type="button">✕</button>
     </div>
     <div class="account-row">
@@ -119,13 +123,13 @@ function addAccountItem(data = {}) {
       </div>
       <div class="field-wrap">
         <label>cookie_name</label>
-        <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}">
+        <input type="text" class="f-cookie_name" placeholder="session" value="${cookieNameVal}" ${cookieDisabled}>
       </div>
     </div>
     <div class="account-row">
       <div class="field-wrap">
         <label>api_user <span class="field-opt">自动解析</span></label>
-        <input type="text" class="f-api_user" placeholder="留空则同步时自动获取" value="${esc(data.api_user || '')}">
+        <input type="text" class="f-api_user" placeholder="${apiUserPlaceholder}" value="${esc(data.api_user || '')}">
       </div>
       <div class="field-wrap">
         <label>env_key_suffix <span class="field-opt">自动生成</span></label>
@@ -292,11 +296,14 @@ function openImportDialog() {
  */
 function convertFromAnyRouterAccounts(items) {
   return items.map(item => {
-    const sessionCookie = item?.cookies?.session;
-    if (!sessionCookie) return null;
+    if (!item?.cookies) return null;
+    // Accept NewAPI single-cookie format or heibai multi-cookie format
+    const hasSession = !!item.cookies.session;
+    const hasHeibai = !!item.cookies['__Secure-authjs.session-token'];
+    if (!hasSession && !hasHeibai) return null;
 
     const provider = item.provider || 'anyrouter';
-    const domain   = PROVIDER_DOMAINS[provider] || null;
+    const domain   = item.domain || PROVIDER_DOMAINS[provider] || null;
     if (!domain) return null;
 
     return { domain };
