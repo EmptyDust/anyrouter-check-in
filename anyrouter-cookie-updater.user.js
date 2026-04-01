@@ -469,7 +469,7 @@
     'https://cdk.hybgzs.com':     'HEIBAI',
   };
 
-  // ── Heibai (黑白站) multi-cookie provider ──
+  // ── Heibai multi-cookie provider ──
   const HEIBAI_COOKIE_NAMES = [
     'server_name_session',
     '__Host-authjs.csrf-token',
@@ -550,7 +550,7 @@
       const secretValue = JSON.stringify({
         cookies,
         provider: 'heibai',
-        name: `黑白站-${userId}`,
+        name: `heibai-${userId}`,
         domain: domain.replace(/\/$/, ''),
       });
 
@@ -937,7 +937,7 @@
     const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
     item.innerHTML = `
       <div class="arc-item-hdr">
-        <span class="arc-item-lbl">账号 ${idx}${isHeibai ? ' (黑白站)' : ''}</span>
+        <span class="arc-item-lbl">账号 ${idx}${isHeibai ? ' (heibai)' : ''}</span>
         <button class="arc-del" title="删除">✕</button>
       </div>
       <div class="arc-row">

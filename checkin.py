@@ -572,7 +572,7 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 
 
 async def _get_wallet_balance(page, account_name: str, domain: str) -> dict:
-	"""通过 /api/wallet/balance 获取黑白站余额"""
+	"""通过 /api/wallet/balance 获取 heibai 余额"""
 	try:
 		result = await page.evaluate(
 			"""async (domain) => {
@@ -605,7 +605,7 @@ async def check_in_with_turnstile_browser(
 ):
 	"""通过 Playwright 浏览器执行签到（含 Cloudflare Turnstile 验证）
 
-	适用于非 NewAPI/OneAPI 格式的自定义签到站点（如黑白站）。
+	适用于非 NewAPI/OneAPI 格式的自定义签到站点（如 heibai）。
 	流程：导航到签到页 -> 获取余额 -> 点击签到按钮 -> 解决 Turnstile -> 等待完成 -> 获取更新余额
 	"""
 	user_cookies = parse_cookies(account.cookies)
@@ -732,7 +732,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 自定义浏览器签到（含 Turnstile 验证，如黑白站）
+	# 自定义浏览器签到（含 Turnstile 验证，如 heibai）
 	if provider_config.needs_browser_checkin():
 		return await check_in_with_turnstile_browser(account, account_name, provider_config)
 

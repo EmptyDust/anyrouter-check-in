@@ -113,7 +113,7 @@ function addAccountItem(data = {}) {
   const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
   item.innerHTML = `
     <div class="account-item-header">
-      <span class="account-item-label">账号 ${idx}${isHeibai ? ' (黑白站)' : ''}</span>
+      <span class="account-item-label">账号 ${idx}${isHeibai ? ' (heibai)' : ''}</span>
       <button class="account-item-del" title="删除" type="button">✕</button>
     </div>
     <div class="account-row">

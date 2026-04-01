@@ -241,7 +241,7 @@ function getProviderName(domain) {
 // Known built-in providers (already hardcoded in checkin.py — excluded from PROVIDERS secret)
 const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'heibai']);
 
-// ── Heibai (黑白站) multi-cookie provider ────────────────────────────────────
+// ── Heibai multi-cookie provider ─────────────────────────────────────────────
 
 const HEIBAI_COOKIE_NAMES = [
   'server_name_session',
@@ -354,7 +354,7 @@ async function syncHeibaiAccount(config, account, url, hostname) {
     const secretValue = JSON.stringify({
       cookies: collectedCookies,
       provider: 'heibai',
-      name: `黑白站-${userId}`,
+      name: `heibai-${userId}`,
       domain: url,
     });
 
