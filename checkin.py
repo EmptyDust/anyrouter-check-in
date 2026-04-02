@@ -552,36 +552,6 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification...')
 
-	# Diagnostic: dump page structure on first call
-	try:
-		diag = await page.evaluate("""() => {
-			const result = {};
-			// Check for cf-turnstile-response input
-			const resp = document.querySelector('input[name="cf-turnstile-response"]');
-			result.hasResponseInput = !!resp;
-			if (resp) {
-				const parent = resp.parentElement;
-				result.parentTag = parent ? parent.tagName : null;
-				result.parentClass = parent ? parent.className : null;
-				result.parentHasShadow = parent ? !!parent.shadowRoot : false;
-				result.parentAttrs = parent ? Array.from(parent.attributes).map(a => a.name + '=' + a.value.substring(0, 30)).join(', ') : null;
-			}
-			// Check for Turnstile containers
-			result.hasCfTurnstile = !!document.querySelector('.cf-turnstile');
-			result.hasSitekey = !!document.querySelector('[data-sitekey]');
-			// Count all iframes
-			const iframes = document.querySelectorAll('iframe');
-			result.iframeCount = iframes.length;
-			result.iframeSrcs = Array.from(iframes).map(f => (f.src || '').substring(0, 60));
-			// Check turnstile API
-			result.hasTurnstileApi = typeof turnstile !== 'undefined';
-			try { result.turnstileResponse = turnstile.getResponse() ? 'has_value' : 'empty'; } catch(e) { result.turnstileResponse = 'error'; }
-			return result;
-		}""")
-		print(f'[DEBUG] {account_name}: Page structure: {diag}')
-	except Exception as e:
-		print(f'[DEBUG] {account_name}: Diagnostic error: {str(e)[:60]}')
-
 	for attempt in range(20):
 		# Strategy 0: Check if token already exists (managed mode auto-resolved)
 		try:
@@ -741,12 +711,269 @@ async def _get_wallet_balance(page, account_name: str, domain: str) -> dict:
 		return {'success': False, 'error': f'Failed to get balance: {str(e)[:50]}'}
 
 
+# ─── DrissionPage (real Chrome) check-in for Turnstile-protected sites ────────
+
+
+def _get_wallet_balance_dp(tab, account_name: str, domain: str) -> dict:
+	"""通过 DrissionPage 在页面内执行 fetch 获取 heibai 余额"""
+	try:
+		result = tab.run_js(
+			'''async () => {
+				try {
+					const r = await fetch(arguments[0] + '/api/wallet/balance', {credentials: 'include'});
+					if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
+					return await r.json();
+				} catch(e) { return {success: false, error: e.message}; }
+			}''',
+			domain,
+		)
+		if result and result.get('success') and result.get('data'):
+			total = result['data'].get('total', 0)
+			quota = round(total / 500000, 2)
+			return {
+				'success': True,
+				'quota': quota,
+				'used_quota': 0,
+				'display': f'💰 Current balance: ${quota}',
+			}
+		return {'success': False, 'error': result.get('error', 'Unknown error') if result else 'No response'}
+	except Exception as e:
+		return {'success': False, 'error': f'Failed to get balance: {str(e)[:50]}'}
+
+
+def _solve_turnstile_dp(tab, account_name: str) -> bool:
+	"""使用 DrissionPage (real Chrome) 解决 Cloudflare Turnstile
+
+	DrissionPage 使用真实 Chrome 进程，配合 turnstilePatch 扩展注入 CDP mouse patch，
+	指纹接近真人浏览器，managed/invisible Turnstile 有更高概率自动通过。
+
+	策略：
+	0. 检查 turnstile.getResponse() 是否已有 token（managed 模式自动解决）
+	1. 调用 turnstile.reset()/execute() 触发验证
+	2. shadow DOM 遍历找到 iframe 并点击
+	3. 轮询等待 token 出现
+	"""
+	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification (DrissionPage)...')
+
+	for attempt in range(30):
+		# Strategy 0: Check if token already present
+		try:
+			token = tab.run_js('''
+				try { const r = turnstile.getResponse(); if (r) return r; } catch(e) {}
+				const inp = document.querySelector('input[name="cf-turnstile-response"]');
+				return (inp && inp.value) ? inp.value : null;
+			''')
+			if token:
+				print(f'[SUCCESS] {account_name}: Turnstile solved (token present, attempt {attempt + 1})')
+				return True
+		except Exception:
+			pass
+
+		# Strategy 1: Trigger via JS API
+		if attempt == 0:
+			try:
+				tab.run_js('try { turnstile.reset(); } catch(e) {} try { turnstile.execute(); } catch(e) {}')
+				print(f'[INFO] {account_name}: Called turnstile.reset()/execute()')
+			except Exception:
+				pass
+
+		# Strategy 2: Shadow DOM traversal — find iframe and click
+		if attempt in (2, 8, 15):
+			try:
+				resp_input = tab.ele('@name=cf-turnstile-response', timeout=2)
+				if resp_input:
+					wrapper = resp_input.parent()
+					if wrapper and wrapper.shadow_root:
+						iframe_el = wrapper.shadow_root.ele('tag:iframe', timeout=2)
+						if iframe_el:
+							print(f'[INFO] {account_name}: Found Turnstile iframe in shadow DOM, clicking...')
+							iframe_el.click()
+							time.sleep(3)
+							continue
+						# Try deeper: iframe → body → shadowRoot → input
+						try:
+							iframe_body = iframe_el.ele('tag:body', timeout=2)
+							if iframe_body and iframe_body.shadow_root:
+								inner_input = iframe_body.shadow_root.ele('tag:input', timeout=2)
+								if inner_input:
+									inner_input.click()
+									print(f'[INFO] {account_name}: Clicked inner shadow DOM input')
+									time.sleep(3)
+									continue
+						except Exception:
+							pass
+			except Exception as e:
+				if attempt < 5:
+					print(f'[INFO] {account_name}: Shadow DOM traversal: {str(e)[:60]}')
+
+		# Retry turnstile.execute() periodically
+		if attempt in (5, 10, 15, 20, 25):
+			try:
+				tab.run_js('try { turnstile.execute() } catch(e) {}')
+			except Exception:
+				pass
+
+		time.sleep(1.5)
+
+	print(f'[FAILED] {account_name}: Turnstile not solved after 30 attempts')
+	return False
+
+
+def check_in_with_drissionpage(
+	account,
+	account_name: str,
+	provider_config,
+):
+	"""通过 DrissionPage (real Chrome) 执行签到（含 Cloudflare Turnstile 验证）
+
+	使用真实 Chrome 浏览器代替 Playwright Chromium，避免被 Turnstile managed 模式检测为自动化工具。
+	turnstilePatch 扩展确保 CDP mouse patch 在所有 frame 中生效（含 cross-origin Turnstile iframe）。
+	"""
+	import pathlib
+
+	from DrissionPage import ChromiumOptions, ChromiumPage
+
+	user_cookies = parse_cookies(account.cookies)
+	if not user_cookies:
+		print(f'[FAILED] {account_name}: Invalid configuration format')
+		return False, None, None
+
+	print(f'[INFO] {account_name}: Using DrissionPage (real Chrome) with Turnstile bypass')
+
+	# Configure Chrome
+	co = ChromiumOptions()
+	co.auto_port()
+	co.set_argument('--no-sandbox')
+	co.set_argument('--disable-dev-shm-usage')
+	co.set_argument('--disable-blink-features=AutomationControlled')
+	co.set_argument('--window-size=1280,900')
+	co.set_user_agent(PLAYWRIGHT_USER_AGENT)
+
+	# Load turnstilePatch extension
+	ext_path = str(pathlib.Path(__file__).parent / 'turnstilePatch')
+	if os.path.isdir(ext_path):
+		co.add_extension(ext_path)
+	else:
+		print(f'[WARN] {account_name}: turnstilePatch extension not found at {ext_path}')
+
+	# Chrome path: auto-detect or fallback to Windows default
+	import shutil
+
+	chrome_path = shutil.which('chrome') or shutil.which('google-chrome')
+	if not chrome_path:
+		for candidate in [
+			r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+			r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+		]:
+			if os.path.exists(candidate):
+				chrome_path = candidate
+				break
+	if chrome_path:
+		co.set_browser_path(chrome_path)
+
+	co.headless(True)
+	page = ChromiumPage(co)
+
+	try:
+		domain = provider_config.domain
+		hostname = urlparse(domain).hostname
+
+		# Navigate to domain root to establish context, then set cookies
+		page.get(domain)
+		time.sleep(1)
+
+		for name, value in user_cookies.items():
+			page.set.cookies({
+				'name': name,
+				'value': value,
+				'domain': hostname,
+				'path': '/',
+				'secure': True,
+			})
+
+		# Navigate to check-in page
+		checkin_url = f'{domain}{provider_config.checkin_page_path}'
+		print(f'[PROCESSING] {account_name}: Navigating to check-in page...')
+		page.get(checkin_url)
+		time.sleep(3)
+
+		# Check session expiry
+		if '/login' in page.url or '/auth/signin' in page.url:
+			print(f'[FAILED] {account_name}: Session expired - redirected to login')
+			page.quit()
+			return False, None, None
+
+		# Get balance before check-in
+		user_info_before = _get_wallet_balance_dp(page, account_name, domain)
+		if user_info_before.get('success'):
+			print(user_info_before['display'])
+
+		# Check if already checked in
+		already_el = page.ele('text=今日已签到', timeout=2)
+		if already_el:
+			print(f'[SUCCESS] {account_name}: Already checked in today')
+			page.quit()
+			return True, user_info_before, user_info_before
+
+		# Find check-in button
+		checkin_btn = page.ele('tag:button@@text():立即签到', timeout=3) or page.ele('tag:button@@text():签到', timeout=2)
+		if not checkin_btn:
+			print(f'[FAILED] {account_name}: Check-in button not found on page')
+			page.quit()
+			return False, user_info_before, None
+
+		# Click check-in button
+		print(f'[PROCESSING] {account_name}: Clicking check-in button...')
+		checkin_btn.click()
+		time.sleep(2)
+
+		# Solve Turnstile
+		turnstile_solved = _solve_turnstile_dp(page, account_name)
+		if not turnstile_solved:
+			print(f'[FAILED] {account_name}: Failed to solve Turnstile verification')
+			page.quit()
+			return False, user_info_before, None
+
+		# Wait for check-in completion
+		print(f'[PROCESSING] {account_name}: Waiting for check-in completion...')
+		success = False
+		signed_el = page.ele('text=今日已签到', timeout=15)
+		if signed_el:
+			print(f'[SUCCESS] {account_name}: Check-in successful!')
+			success = True
+		else:
+			body_text = page.ele('tag:body').text or ''
+			if '今日已签到' in body_text or '签到成功' in body_text:
+				print(f'[SUCCESS] {account_name}: Check-in successful!')
+				success = True
+			else:
+				print(f'[FAILED] {account_name}: Check-in result unclear')
+
+		# Get balance after check-in
+		time.sleep(2)
+		user_info_after = _get_wallet_balance_dp(page, account_name, domain)
+
+		page.quit()
+		return success, user_info_before, user_info_after
+
+	except Exception as e:
+		print(f'[FAILED] {account_name}: DrissionPage check-in error - {str(e)[:100]}')
+		try:
+			page.quit()
+		except Exception:
+			pass
+		return False, None, None
+
+
 async def check_in_with_turnstile_browser(
 	account: AccountConfig,
 	account_name: str,
 	provider_config,
 ):
-	"""通过 Playwright 浏览器执行签到（含 Cloudflare Turnstile 验证）
+	"""[DEPRECATED] Playwright-based Turnstile bypass — replaced by check_in_with_drissionpage().
+	Kept for reference/rollback. Playwright Chromium is detected by Turnstile managed mode.
+
+	通过 Playwright 浏览器执行签到（含 Cloudflare Turnstile 验证）
 
 	适用于非 NewAPI/OneAPI 格式的自定义签到站点（如 heibai）。
 	流程：导航到签到页 -> 获取余额 -> 点击签到按钮 -> 解决 Turnstile -> 等待完成 -> 获取更新余额
@@ -894,9 +1121,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 自定义浏览器签到（含 Turnstile 验证，如 heibai）
+	# 自定义浏览器签到（含 Turnstile 验证，如 heibai）— 使用 DrissionPage (real Chrome)
 	if provider_config.needs_browser_checkin():
-		return await check_in_with_turnstile_browser(account, account_name, provider_config)
+		return await asyncio.to_thread(check_in_with_drissionpage, account, account_name, provider_config)
 
 	# Cloudflare 防护站点：通过 Playwright 浏览器内 fetch 执行所有请求
 	if provider_config.needs_playwright():
