@@ -718,13 +718,9 @@ def _get_wallet_balance_dp(tab, account_name: str, domain: str) -> dict:
 	"""通过 DrissionPage 在页面内执行 fetch 获取 heibai 余额"""
 	try:
 		result = tab.run_js(
-			'''async () => {
-				try {
-					const r = await fetch(arguments[0] + '/api/wallet/balance', {credentials: 'include'});
-					if (!r.ok) return {success: false, error: 'HTTP ' + r.status};
-					return await r.json();
-				} catch(e) { return {success: false, error: e.message}; }
-			}''',
+			'''return fetch(arguments[0] + '/api/wallet/balance', {credentials: 'include'})
+				.then(r => r.ok ? r.json() : {success: false, error: 'HTTP ' + r.status})
+				.catch(e => ({success: false, error: e.message}))''',
 			domain,
 		)
 		if result and result.get('success') and result.get('data'):
@@ -868,7 +864,7 @@ def check_in_with_drissionpage(
 	if chrome_path:
 		co.set_browser_path(chrome_path)
 
-	co.headless(True)
+	co.headless(False)  # Headed mode required — headless Chrome is detected by Turnstile
 	page = ChromiumPage(co)
 
 	try:
