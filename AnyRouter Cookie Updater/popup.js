@@ -11,6 +11,7 @@ const PROVIDER_DOMAINS = {
   sorai:        'https://newapi.sorai.me',
   apikey:       'https://welfare.apikey.cc',
   computetoken: 'https://computetoken.ai',
+  heibai:       'https://cdk.hybgzs.com',
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -107,7 +108,10 @@ function addAccountItem(data = {}, options = {}) {
   const { collapsed = Boolean(data.domain) } = options;
   item.className = `account-item${collapsed ? ' collapsed' : ''}`;
   // cookie_name defaults to 'session', no extra label text needed
-  const cookieNameVal = esc(data.cookie_name || 'session');
+  const isHeibai = (data.domain || '').includes('cdk.hybgzs.com');
+  const cookieNameVal = isHeibai ? '(多cookie自动提取)' : esc(data.cookie_name || 'session');
+  const cookieDisabled = isHeibai ? 'disabled' : '';
+  const apiUserPlaceholder = isHeibai ? '自动从 cookie 获取' : '留空则同步时自动获取';
   item.innerHTML = `
     <div class="account-item-header">
       <div class="account-item-title">
@@ -427,11 +431,14 @@ function openImportDialog() {
  */
 function convertFromAnyRouterAccounts(items) {
   return items.map(item => {
-    const sessionCookie = item?.cookies?.session;
-    if (!sessionCookie) return null;
+    if (!item?.cookies) return null;
+    // Accept NewAPI single-cookie format or heibai multi-cookie format
+    const hasSession = !!item.cookies.session;
+    const hasHeibai = !!item.cookies['__Secure-authjs.session-token'];
+    if (!hasSession && !hasHeibai) return null;
 
     const provider = item.provider || 'anyrouter';
-    const domain   = PROVIDER_DOMAINS[provider] || null;
+    const domain   = item.domain || PROVIDER_DOMAINS[provider] || null;
     if (!domain) return null;
 
     return { domain };

@@ -246,6 +246,7 @@ const DOMAIN_TO_PROVIDER = {
   'https://newapi.sorai.me':     'SORAI',
   'https://welfare.apikey.cc':   'APIKEY',
   'https://computetoken.ai':     'COMPUTETOKEN',
+  'https://cdk.hybgzs.com':     'HEIBAI',
 };
 
 // Derive a provider tag for any domain (known or unknown)
@@ -264,7 +265,135 @@ function getProviderName(domain) {
 }
 
 // Known built-in providers (already hardcoded in checkin.py — excluded from PROVIDERS secret)
-const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter']);
+const BUILTIN_PROVIDERS = new Set(['anyrouter', 'agentrouter', 'heibai']);
+
+// ── Heibai multi-cookie provider ─────────────────────────────────────────────
+
+const HEIBAI_COOKIE_NAMES = [
+  'server_name_session',
+  '__Host-authjs.csrf-token',
+  '__Secure-authjs.callback-url',
+  '__Secure-nw-uid',
+  '__Secure-authjs.session-token',
+];
+
+function isHeibaiProvider(domain) {
+  return getProviderName(domain) === 'heibai';
+}
+
+async function fetchHeibaiUser(domain, cookies, tabId) {
+  // Strategy 1: use __Secure-nw-uid cookie value as user ID
+  if (cookies['__Secure-nw-uid']) return cookies['__Secure-nw-uid'];
+
+  // Strategy 2: call /api/auth/session in tab context
+  function _fetchAuthSession() {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/api/auth/session', false);
+      xhr.withCredentials = true;
+      xhr.send();
+      if (xhr.status === 200) {
+        const data = JSON.parse(xhr.responseText);
+        return data?.user?.name || data?.user?.id || null;
+      }
+    } catch {}
+    return null;
+  }
+
+  if (tabId) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: _fetchAuthSession,
+      });
+      const id = results?.[0]?.result;
+      if (id) return String(id);
+    } catch {}
+  }
+
+  return null;
+}
+
+async function syncHeibaiAccount(config, account, url, hostname) {
+  const label = account.env_key_suffix || account.domain;
+  let tab = null;
+
+  try {
+    // Phase 1: Extract all required cookies directly from cookie jar
+    const collectedCookies = {};
+    const missingCookies = [];
+
+    for (const name of HEIBAI_COOKIE_NAMES) {
+      const cookie = await findCookieAcrossStores(url, hostname, name);
+      if (cookie) {
+        collectedCookies[name] = cookie.value;
+      } else {
+        missingCookies.push(name);
+      }
+    }
+
+    // Phase 2: If any cookies missing, open background tab and retry
+    if (missingCookies.length > 0) {
+      await Logger.info(`Heibai: ${missingCookies.length} cookies missing, opening tab...`, { missing: missingCookies });
+      tab = await openBackgroundTab(url);
+
+      for (const name of missingCookies) {
+        const cookie = await findCookieAcrossStores(url, hostname, name);
+        if (cookie) {
+          collectedCookies[name] = cookie.value;
+        }
+      }
+    }
+
+    // Must have the session token at minimum
+    if (!collectedCookies['__Secure-authjs.session-token']) {
+      await Logger.error(`Heibai: essential cookie __Secure-authjs.session-token not found for ${label}`, {
+        found: Object.keys(collectedCookies),
+        hint: '请先在浏览器中登录 cdk.hybgzs.com',
+      });
+      if (tab) await closeTab(tab);
+      return { success: false, label, error: 'session cookie not found — please login to cdk.hybgzs.com' };
+    }
+
+    const foundCount = Object.keys(collectedCookies).length;
+    await Logger.success(`Heibai: extracted ${foundCount}/${HEIBAI_COOKIE_NAMES.length} cookies for ${label}`);
+
+    // Resolve user identity
+    const userId = await fetchHeibaiUser(url, collectedCookies, tab?.id);
+    if (tab) { await closeTab(tab); tab = null; }
+
+    if (!userId) {
+      await Logger.error(`Heibai: cannot resolve user identity for ${label}`);
+      return { success: false, label, error: 'cannot resolve heibai user identity' };
+    }
+    await Logger.success(`Heibai: resolved user: ${userId}`);
+
+    // Determine secret name
+    let { env_key_suffix } = account;
+    if (!env_key_suffix) {
+      const sanitized = userId.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 30);
+      env_key_suffix = `${sanitized}_HEIBAI`;
+      await Logger.info(`Heibai: auto-generated env_key_suffix: ${env_key_suffix}`);
+    }
+
+    const secretName = `ANYROUTER_ACCOUNT_${env_key_suffix}`;
+    const secretValue = JSON.stringify({
+      cookies: collectedCookies,
+      provider: 'heibai',
+      name: `heibai-${userId}`,
+      domain: url,
+    });
+
+    await Logger.info(`Pushing to GitHub secret: ${secretName}`);
+    await pushToGitHubSecret(config, secretName, secretValue);
+    await Logger.success(`✅ ${label}: ${secretName} updated`);
+    return { success: true, label, secretName };
+  } catch (e) {
+    if (tab) await closeTab(tab);
+    await Logger.error(`Heibai sync failed for ${label}`, { error: e.message });
+    return { success: false, label, error: e.message };
+  }
+}
 
 // ── Permission check ─────────────────────────────────────────────────────────
 
@@ -612,6 +741,11 @@ async function syncOneAccount(config, account, options = {}) {
     if (!hasPermission) {
       await Logger.error(`No host permission for ${label}. 请右键扩展图标 → "此扩展可以读取和更改网站数据" → "在所有网站上"`, { domain });
       return { success: false, label, error: 'no host permission' };
+    }
+
+    // ── Special handling: heibai multi-cookie provider ──
+    if (isHeibaiProvider(domain)) {
+      return await syncHeibaiAccount(config, account, url, hostname);
     }
 
     // ── Phase 1: Try to read cookie DIRECTLY from the cookie jar (no tab needed) ──
