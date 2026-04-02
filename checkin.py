@@ -552,6 +552,36 @@ async def _solve_turnstile(page, account_name: str) -> bool:
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification...')
 
+	# Diagnostic: dump page structure on first call
+	try:
+		diag = await page.evaluate("""() => {
+			const result = {};
+			// Check for cf-turnstile-response input
+			const resp = document.querySelector('input[name="cf-turnstile-response"]');
+			result.hasResponseInput = !!resp;
+			if (resp) {
+				const parent = resp.parentElement;
+				result.parentTag = parent ? parent.tagName : null;
+				result.parentClass = parent ? parent.className : null;
+				result.parentHasShadow = parent ? !!parent.shadowRoot : false;
+				result.parentAttrs = parent ? Array.from(parent.attributes).map(a => a.name + '=' + a.value.substring(0, 30)).join(', ') : null;
+			}
+			// Check for Turnstile containers
+			result.hasCfTurnstile = !!document.querySelector('.cf-turnstile');
+			result.hasSitekey = !!document.querySelector('[data-sitekey]');
+			// Count all iframes
+			const iframes = document.querySelectorAll('iframe');
+			result.iframeCount = iframes.length;
+			result.iframeSrcs = Array.from(iframes).map(f => (f.src || '').substring(0, 60));
+			// Check turnstile API
+			result.hasTurnstileApi = typeof turnstile !== 'undefined';
+			try { result.turnstileResponse = turnstile.getResponse() ? 'has_value' : 'empty'; } catch(e) { result.turnstileResponse = 'error'; }
+			return result;
+		}""")
+		print(f'[DEBUG] {account_name}: Page structure: {diag}')
+	except Exception as e:
+		print(f'[DEBUG] {account_name}: Diagnostic error: {str(e)[:60]}')
+
 	for attempt in range(20):
 		# Strategy 0: Check if token already exists (managed mode auto-resolved)
 		try:
