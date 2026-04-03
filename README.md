@@ -7,6 +7,7 @@
 [![GitHub Actions](https://github.com/shenhao-stu/anyrouter-check-in/workflows/AnyRouter%20%E8%87%AA%E5%8A%A8%E7%AD%BE%E5%88%B0/badge.svg)](https://github.com/shenhao-stu/anyrouter-check-in/actions)
 [![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Playwright](https://img.shields.io/badge/playwright-enabled-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
+[![DrissionPage](https://img.shields.io/badge/DrissionPage-Turnstile%20bypass-blue)](https://github.com/g1879/DrissionPage)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/shenhao-stu/anyrouter-check-in?color=blue)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/shenhao-stu/anyrouter-check-in?style=social)](https://github.com/shenhao-stu/anyrouter-check-in/stargazers)
@@ -261,7 +262,7 @@ ANYROUTER_ACCOUNT_760_COMPUTETOKEN
 | :--- | :---: | :--- |
 | `anyrouter` | ✅ waf_cookies | `/api/user/sign_in` |
 | `agentrouter` | ✅ waf_cookies | 查询用户信息时自动签到 |
-| `heibai` | ✅ turnstile_browser | Playwright 浏览器交互签到 |
+| `heibai` | ✅ turnstile_browser | DrissionPage + WARP + CDP 点击过盾 |
 
 > 其余平台通过 `PROVIDERS` secret 或插件自动同步。标准 new-api / one-api 站点使用默认路径，404 时自动回退到 `/api/user/checkin`。
 
@@ -448,6 +449,16 @@ uv run pytest tests/ --cov=.
 ---
 
 ## 📝 更新日志
+
+<details>
+<summary><b>v1.8</b> — 2026-04-03 Heibai Turnstile 过盾方案升级</summary>
+
+- 🛡️ Heibai 签到切换为 DrissionPage + WARP + shadow DOM iframe CDP 点击方案
+- 🌐 GitHub Actions 从 Windows 切换到 Ubuntu + Cloudflare WARP
+- 🔧 Chrome 扩展修复 heibai 单账号测试（dryRun 未传递的 bug）
+- 🧹 移除 Windows Chrome 路径硬编码，使用 Chromium 类替代 ChromiumPage
+
+</details>
 
 <details>
 <summary><b>v1.7</b> — 2026-03-17 网络异常自动重试</summary>
