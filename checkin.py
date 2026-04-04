@@ -744,6 +744,7 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 	0. 先 turnstile.reset() 触发验证流程
 	1. 轮询 turnstile.getResponse() / input 检查 token
 	2. shadow DOM 遍历找到 iframe → 注入 CDP mouse patch → 点击 checkbox
+	3. 点击后检查页面是否已完成签到（auto-submit 后页面可能导航）
 	"""
 	print(f'[PROCESSING] {account_name}: Looking for Turnstile verification (DrissionPage)...')
 
@@ -753,7 +754,8 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 	except Exception:
 		pass
 
-	for attempt in range(20):
+	clicked = False
+	for attempt in range(25):
 		# Check if token already present
 		try:
 			token = tab.run_js(
@@ -777,6 +779,20 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 		except Exception:
 			pass
 
+		# Check if page already completed check-in (Turnstile solved + auto-submitted)
+		try:
+			body_text = tab.ele('tag:body').text or ''
+			if '今日已签到' in body_text or '签到成功' in body_text:
+				print(f'[SUCCESS] {account_name}: Check-in completed (page navigated after Turnstile, attempt {attempt + 1})')
+				return True
+		except Exception:
+			pass
+
+		# After first successful click, wait longer and focus on token/page checks
+		if clicked:
+			time.sleep(2)
+			continue
+
 		# Shadow DOM iframe click approach (from grok_register.py)
 		try:
 			ci = tab.ele('@name=cf-turnstile-response')
@@ -791,21 +807,27 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 			)
 			iframe_body = iframe.ele('tag:body').shadow_root
 			iframe_body.ele('tag:input').click()
+			clicked = True
 			print(f'[INFO] {account_name}: Clicked Turnstile checkbox in iframe shadow DOM (attempt {attempt + 1})')
+			time.sleep(3)  # Wait longer after click for Turnstile to process
+			continue
 		except Exception as e:
-			if attempt < 3:
+			if attempt < 5:
 				print(f'[INFO] {account_name}: Shadow DOM click: {str(e)[:80]}')
 
 		# Retry execute periodically
-		if attempt in (5, 10, 15):
+		if attempt in (5, 10, 15, 20):
 			try:
 				tab.run_js('try { turnstile.execute() } catch(e) {}')
 			except Exception:
 				pass
+			# Reset clicked flag to allow retry clicking
+			if attempt >= 10:
+				clicked = False
 
 		time.sleep(1.5)
 
-	print(f'[FAILED] {account_name}: Turnstile not solved after 20 attempts')
+	print(f'[FAILED] {account_name}: Turnstile not solved after 25 attempts')
 	return False
 
 
