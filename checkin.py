@@ -758,7 +758,30 @@ def _solve_turnstile_dp(tab, account_name: str) -> bool:
 		tab.run_js('try { turnstile.execute() } catch(e) { }')
 	except Exception:
 		pass
-	time.sleep(2)  # Wait for execution
+	time.sleep(3)  # Wait for execution
+
+	# Diagnostic: check Turnstile widget state
+	try:
+		ts_info = tab.run_js('''
+			const inp = document.querySelector('input[name="cf-turnstile-response"]');
+			if (!inp) return {present: false};
+			const w = inp.parentElement;
+			const sr = w ? w.shadowRoot : null;
+			const iframe = sr ? sr.querySelector('iframe') : null;
+			const rect = iframe ? iframe.getBoundingClientRect() : null;
+			return {
+				present: true,
+				hasWrapper: !!w,
+				hasShadow: !!sr,
+				hasIframe: !!iframe,
+				iframeW: rect ? rect.width : 0,
+				iframeH: rect ? rect.height : 0,
+				inputVal: (inp.value || '').substring(0, 20),
+			};
+		''')
+		print(f'[DEBUG] {account_name}: Turnstile state: {ts_info}')
+	except Exception as e:
+		print(f'[DEBUG] {account_name}: Turnstile state check failed: {str(e)[:60]}')
 
 	clicked = False
 	for attempt in range(25):
@@ -892,14 +915,19 @@ def check_in_with_drissionpage(
 
 	print(f'[INFO] {account_name}: Using DrissionPage (real Chrome) with Turnstile bypass')
 
-	# Configure Chrome
+	# Configure Chrome with stealth settings
 	co = ChromiumOptions()
 	co.auto_port()
 	co.set_argument('--no-sandbox')
 	co.set_argument('--disable-dev-shm-usage')
 	co.set_argument('--disable-blink-features=AutomationControlled')
 	co.set_argument('--window-size=1280,900')
+	co.set_argument('--disable-features=IsolateOrigins,site-per-process')
+	co.set_argument('--disable-site-isolation-trials')
+	co.set_argument('--disable-web-security')
 	co.set_user_agent(PLAYWRIGHT_USER_AGENT)
+	co.set_pref('credentials_enable_service', False)
+	co.set_pref('profile.password_manager_enabled', False)
 
 	# Load turnstilePatch extension
 	ext_path = str(pathlib.Path(__file__).parent / 'turnstilePatch')
@@ -912,6 +940,28 @@ def check_in_with_drissionpage(
 	page = browser.get_tab()
 
 	try:
+		# Inject stealth patches before any navigation
+		page.run_js('''
+			// Remove webdriver flag
+			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+			// Override plugins
+			Object.defineProperty(navigator, 'plugins', {
+				get: () => [1, 2, 3, 4, 5],
+			});
+			// Override languages
+			Object.defineProperty(navigator, 'languages', {
+				get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+			});
+			// Chrome runtime
+			window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+			// Override permissions
+			const originalQuery = window.navigator.permissions.query;
+			window.navigator.permissions.query = (parameters) =>
+				parameters.name === 'notifications'
+					? Promise.resolve({ state: Notification.permission })
+					: originalQuery(parameters);
+		''')
+
 		domain = provider_config.domain
 		hostname = urlparse(domain).hostname
 
