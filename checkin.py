@@ -857,6 +857,9 @@ def check_in_heibai_api(
 			return True, user_info_before, user_info_after
 		else:
 			error = result.get('error', checkin_resp.text[:100])
+			if '已经签到' in error or '已签到' in error:
+				print(f'[SUCCESS] {account_name}: Already checked in today')
+				return True, user_info_before, user_info_before
 			print(f'[FAILED] {account_name}: Check-in failed: {error}')
 			return False, user_info_before, None
 
