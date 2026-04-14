@@ -108,16 +108,17 @@ class AppConfig:
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc'],
 			),
-			'heibai': ProviderConfig(
-				name='heibai',
-				domain='https://cdk.hybgzs.com',
-				login_path='/login',
-				sign_in_path=None,  # 通过纯 API + PoW 验证码签到
-				user_info_path='/api/wallet/balance',
-				api_user_key='',  # Session-based auth, no api_user header
-				bypass_method='turnstile_browser',
-				checkin_page_path='/gas-station/checkin',
-			),
+			# heibai 黑白站已停用（账号因自动签到检测被封禁）
+			# 'heibai': ProviderConfig(
+			# 	name='heibai',
+			# 	domain='https://cdk.hybgzs.com',
+			# 	login_path='/login',
+			# 	sign_in_path=None,
+			# 	user_info_path='/api/wallet/balance',
+			# 	api_user_key='',
+			# 	bypass_method='turnstile_browser',
+			# 	checkin_page_path='/gas-station/checkin',
+			# ),
 		}
 
 		# 尝试从环境变量加载自定义 providers
