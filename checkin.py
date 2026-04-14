@@ -430,21 +430,23 @@ async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 45000) -
 				// 4. 渲染 widget — 必须可见且有最小尺寸
 				return new Promise((resolve, reject) => {
 					const div = document.createElement('div');
-					div.style.cssText = 'position:fixed;bottom:0;right:0;width:350px;height:80px;z-index:99999;overflow:hidden;';
+					div.style.cssText = 'position:fixed;bottom:10px;right:10px;width:350px;height:80px;z-index:99999;';
 					document.body.appendChild(div);
 					const timer = setTimeout(() => reject('Turnstile solve timeout'), timeoutMs);
 					try {
 						const widgetId = window.turnstile.render(div, {
 							sitekey: siteKey,
+							appearance: 'always',
+							retry: 'auto',
+							'retry-interval': 3000,
 							callback: (token) => {
 								clearTimeout(timer);
 								console.log('[Turnstile] Solved, token length:', token.length);
 								resolve(token);
 							},
 							'error-callback': (err) => {
-								clearTimeout(timer);
 								console.log('[Turnstile] Error:', err);
-								reject('Turnstile error: ' + err);
+								// 不立即 reject，让 retry 机制继续尝试
 							},
 							'timeout-callback': () => {
 								clearTimeout(timer);
@@ -494,6 +496,11 @@ async def check_in_with_playwright(
 			)
 
 			try:
+				# 反自动化检测：覆盖 navigator.webdriver
+				await context.add_init_script("""
+					Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+				""")
+
 				# 注入 session cookie
 				hostname = urlparse(provider_config.domain).hostname
 				for name, value in user_cookies.items():
@@ -599,6 +606,7 @@ async def check_in_with_playwright(
 								print(f'[INFO] {account_name}: Turnstile required, solving in browser...')
 								turnstile_token = await _solve_turnstile_in_page(page, provider_config.domain)
 								if turnstile_token:
+									# new-api 将 turnstile token 作为 query param 发送
 									retry_result = await page.evaluate(
 										"""async ([path, key, user, token]) => {
 											const headers = {
@@ -607,11 +615,8 @@ async def check_in_with_playwright(
 												[key]: user
 											};
 											try {
-												const r = await fetch(path, {
-													method: 'POST',
-													headers,
-													body: JSON.stringify({turnstile: token})
-												});
+												const url = path + '?turnstile=' + encodeURIComponent(token);
+												const r = await fetch(url, {method: 'POST', headers});
 												const status = r.status;
 												let body;
 												try { body = await r.json(); } catch(e) { body = {_raw: await r.text()}; }
