@@ -261,7 +261,7 @@ ANYROUTER_ACCOUNT_760_COMPUTETOKEN
 | :--- | :---: | :--- |
 | `anyrouter` | ✅ waf_cookies | `/api/user/sign_in` |
 | `agentrouter` | ✅ waf_cookies | 查询用户信息时自动签到 |
-| `heibai` | ✅ cap.js PoW | 纯 API + SHA-256 工作量证明（无需浏览器） |
+| ~~`heibai`~~ | ~~cap.js PoW~~ | ~~已停用（账号因自动签到检测被封禁）~~ |
 
 > 其余平台通过 `PROVIDERS` secret 或插件自动同步。标准 new-api / one-api 站点使用默认路径，404 时自动回退到 `/api/user/checkin`。
 
@@ -448,6 +448,19 @@ uv run pytest tests/ --cov=.
 ---
 
 ## 📝 更新日志
+
+<details>
+<summary><b>v1.9</b> — 2026-04-14 签到体验优化 + heibai 停用</summary>
+
+- 🚫 **heibai 停用** — 账号因自动签到检测被封禁，代码已注释保留
+- 📊 **通知频率优化** — 仅在余额变化、首次运行或全部失败时发送通知
+- 📝 **通知格式精简** — 按状态分组，每账号一行，无变化账号折叠显示
+- 🔐 **SSL 证书回退** — 自签名证书站点自动 `verify=False` 重试
+- 🛡️ **Turnstile 自动检测** — 签到返回 Turnstile 要求时自动切换 Playwright
+- 🐛 **错误信息透明化** — 不再显示 "Unknown error"，展示实际错误原因
+- ⏱️ **Playwright 超时增加** — Cloudflare challenge 超时从 30s 增至 60s
+
+</details>
 
 <details>
 <summary><b>v1.8</b> — 2026-04-06 Heibai 签到方案重构：纯 API + PoW 验证码</summary>
