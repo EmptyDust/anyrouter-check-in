@@ -378,12 +378,14 @@ def _parse_user_info_json(data: dict) -> dict:
 	return {'success': False, 'error': 'API returned success=false'}
 
 
-async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 30000) -> str | None:
+async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 45000) -> str | None:
 	"""在 Playwright 页面中渲染并解决 Turnstile 挑战，返回 token。
 
 	流程: 从 /api/status 获取 sitekey → 注入 Turnstile JS → 渲染并等待自动解决。
 	"""
 	try:
+		# 设置更长的 evaluate 超时（Turnstile 解决可能需要 45s+）
+		page.set_default_timeout(60000)
 		token = await page.evaluate(
 			"""async ([domain, timeoutMs]) => {
 				// 1. 查找页面上已有的 token
@@ -407,34 +409,53 @@ async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 30000) -
 					const statusResp = await fetch(domain + '/api/status');
 					const statusData = await statusResp.json();
 					siteKey = statusData?.data?.turnstile_site_key;
-				} catch(e) {}
+				} catch(e) { console.log('[Turnstile] Failed to get sitekey:', e); }
 
 				if (!siteKey) return null;
+				console.log('[Turnstile] Got sitekey:', siteKey);
 
 				// 3. 注入 Turnstile JS（如果尚未加载）
 				if (!window.turnstile) {
 					await new Promise((resolve, reject) => {
 						const script = document.createElement('script');
-						script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-						script.onload = resolve;
+						script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=__tcb';
+						window.__tcb = resolve;
 						script.onerror = () => reject('Failed to load Turnstile script');
 						document.head.appendChild(script);
-						setTimeout(() => reject('Turnstile script load timeout'), 10000);
+						setTimeout(() => reject('Turnstile script load timeout'), 15000);
 					});
+					console.log('[Turnstile] Script loaded');
 				}
 
-				// 4. 渲染并等待解决
+				// 4. 渲染 widget — 必须可见且有最小尺寸
 				return new Promise((resolve, reject) => {
 					const div = document.createElement('div');
-					div.style.position = 'fixed';
-					div.style.bottom = '0';
-					div.style.right = '0';
+					div.style.cssText = 'position:fixed;bottom:0;right:0;width:350px;height:80px;z-index:99999;overflow:hidden;';
 					document.body.appendChild(div);
 					const timer = setTimeout(() => reject('Turnstile solve timeout'), timeoutMs);
-					window.turnstile.render(div, {
-						sitekey: siteKey,
-						callback: (token) => { clearTimeout(timer); resolve(token); }
-					});
+					try {
+						const widgetId = window.turnstile.render(div, {
+							sitekey: siteKey,
+							callback: (token) => {
+								clearTimeout(timer);
+								console.log('[Turnstile] Solved, token length:', token.length);
+								resolve(token);
+							},
+							'error-callback': (err) => {
+								clearTimeout(timer);
+								console.log('[Turnstile] Error:', err);
+								reject('Turnstile error: ' + err);
+							},
+							'timeout-callback': () => {
+								clearTimeout(timer);
+								reject('Turnstile widget timeout');
+							}
+						});
+						console.log('[Turnstile] Widget rendered, id:', widgetId);
+					} catch(e) {
+						clearTimeout(timer);
+						reject('Turnstile render error: ' + e.message);
+					}
 				});
 			}""",
 			[domain, timeout_ms],
@@ -443,7 +464,7 @@ async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 30000) -
 			print(f'[SUCCESS] Turnstile token obtained ({len(token)} chars)')
 		return token
 	except Exception as e:
-		print(f'[WARN] Turnstile solve failed: {str(e)[:80]}')
+		print(f'[WARN] Turnstile solve failed: {str(e)[:100]}')
 		return None
 
 
