@@ -379,16 +379,17 @@ def _parse_user_info_json(data: dict) -> dict:
 
 
 async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 30000) -> str | None:
-	"""在 Playwright 页面中渲染并解决 Turnstile 挑战，返回 token。"""
+	"""在 Playwright 页面中渲染并解决 Turnstile 挑战，返回 token。
+
+	流程: 从 /api/status 获取 sitekey → 注入 Turnstile JS → 渲染并等待自动解决。
+	"""
 	try:
-		# 注入一个隐藏的 Turnstile widget 并等待其自动解决
 		token = await page.evaluate(
-			"""async (timeoutMs) => {
-				// 查找已有的 turnstile response
+			"""async ([domain, timeoutMs]) => {
+				// 1. 查找页面上已有的 token
 				const existing = document.querySelector('[name="cf-turnstile-response"]');
 				if (existing && existing.value) return existing.value;
 
-				// 尝试通过 turnstile API 获取
 				if (window.turnstile) {
 					const widgets = document.querySelectorAll('.cf-turnstile');
 					for (const w of widgets) {
@@ -400,41 +401,43 @@ async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 30000) -
 					}
 				}
 
-				// 找到 sitekey 并手动渲染
-				const siteKeyMeta = document.querySelector('meta[name="turnstile-site-key"]');
-				const siteKey = siteKeyMeta ? siteKeyMeta.content : null;
+				// 2. 从 /api/status 获取 sitekey
+				let siteKey = null;
+				try {
+					const statusResp = await fetch(domain + '/api/status');
+					const statusData = await statusResp.json();
+					siteKey = statusData?.data?.turnstile_site_key;
+				} catch(e) {}
 
-				if (!siteKey && !window.turnstile) return null;
+				if (!siteKey) return null;
 
-				if (siteKey && window.turnstile) {
-					return new Promise((resolve, reject) => {
-						const div = document.createElement('div');
-						div.style.position = 'fixed';
-						div.style.bottom = '0';
-						div.style.right = '0';
-						document.body.appendChild(div);
-						const timer = setTimeout(() => reject('timeout'), timeoutMs);
-						window.turnstile.render(div, {
-							sitekey: siteKey,
-							callback: (token) => { clearTimeout(timer); resolve(token); }
-						});
+				// 3. 注入 Turnstile JS（如果尚未加载）
+				if (!window.turnstile) {
+					await new Promise((resolve, reject) => {
+						const script = document.createElement('script');
+						script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+						script.onload = resolve;
+						script.onerror = () => reject('Failed to load Turnstile script');
+						document.head.appendChild(script);
+						setTimeout(() => reject('Turnstile script load timeout'), 10000);
 					});
 				}
 
-				// 等待已有 widget 自动解决
+				// 4. 渲染并等待解决
 				return new Promise((resolve, reject) => {
-					const timer = setTimeout(() => reject('timeout'), timeoutMs);
-					const check = setInterval(() => {
-						const el = document.querySelector('[name="cf-turnstile-response"]');
-						if (el && el.value) {
-							clearInterval(check);
-							clearTimeout(timer);
-							resolve(el.value);
-						}
-					}, 500);
+					const div = document.createElement('div');
+					div.style.position = 'fixed';
+					div.style.bottom = '0';
+					div.style.right = '0';
+					document.body.appendChild(div);
+					const timer = setTimeout(() => reject('Turnstile solve timeout'), timeoutMs);
+					window.turnstile.render(div, {
+						sitekey: siteKey,
+						callback: (token) => { clearTimeout(timer); resolve(token); }
+					});
 				});
 			}""",
-			timeout_ms,
+			[domain, timeout_ms],
 		)
 		if token:
 			print(f'[SUCCESS] Turnstile token obtained ({len(token)} chars)')
@@ -1008,6 +1011,7 @@ async def main():
 						'usage_increase': usage_increase,
 						'balance_change': balance_change,
 						'success': success,
+						'error_message': None if success else 'Check-in failed',
 					}
 
 			provider_config_for_detail = app_config.get_provider(account.provider)
