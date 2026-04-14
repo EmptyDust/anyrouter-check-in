@@ -185,8 +185,8 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 NEW_API_CHECKIN_PATH = '/api/user/checkin'
 
 
-def _parse_check_in_response(account_name: str, response) -> bool:
-	"""解析签到响应，返回是否成功"""
+def _parse_check_in_response(account_name: str, response) -> bool | str:
+	"""解析签到响应，返回是否成功。返回 'turnstile' 表示需要 Turnstile 验证。"""
 	if response.status_code == 200:
 		try:
 			result = response.json()
@@ -199,6 +199,10 @@ def _parse_check_in_response(account_name: str, response) -> bool:
 				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
 					print(f'[SUCCESS] {account_name}: Already checked in today')
 					return True
+				# 检测 Turnstile 验证要求
+				if 'turnstile' in str(error_msg).lower():
+					print(f'[INFO] {account_name}: Turnstile token required, switching to Playwright')
+					return 'turnstile'
 				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
 				return False
 		except json.JSONDecodeError:
@@ -418,7 +422,7 @@ async def check_in_with_playwright(
 
 				# 导航到站点，通过 Cloudflare challenge
 				print(f'[PROCESSING] {account_name}: Navigating to pass Cloudflare challenge...')
-				await page.goto(f'{provider_config.domain}/', wait_until='networkidle')
+				await page.goto(f'{provider_config.domain}/', wait_until='networkidle', timeout=60000)
 				try:
 					await page.wait_for_function('document.readyState === "complete"', timeout=10000)
 				except Exception:
@@ -525,9 +529,10 @@ async def check_in_with_playwright(
 				return success, user_info_before, user_info_after
 
 			except Exception as e:
-				print(f'[FAILED] {account_name}: Playwright check-in error - {str(e)[:100]}')
+				error_msg = str(e)[:100]
+				print(f'[FAILED] {account_name}: Playwright check-in error - {error_msg}')
 				await context.close()
-				return False, None, None
+				return False, {'success': False, 'error': f'Playwright: {error_msg}'}, None
 
 
 
@@ -720,6 +725,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None, None
 
 	client = httpx.Client(http2=True, timeout=30.0)
+	ssl_verify = True
 
 	try:
 		client.cookies.update(all_cookies)
@@ -743,7 +749,19 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		# 获取用户信息（带重试，防止网络抖动）
 		user_info_before = None
 		for attempt in range(1, MAX_RETRIES + 1):
-			user_info_before = get_user_info(client, headers, user_info_url)
+			try:
+				user_info_before = get_user_info(client, headers, user_info_url)
+			except Exception as e:
+				# SSL 证书错误：重建 client 跳过证书验证
+				if 'CERTIFICATE_VERIFY_FAILED' in str(e) and ssl_verify:
+					print(f'[WARN] {account_name}: SSL certificate error, retrying without verification')
+					client.close()
+					client = httpx.Client(http2=True, timeout=30.0, verify=False)
+					client.cookies.update(all_cookies)
+					ssl_verify = False
+					user_info_before = get_user_info(client, headers, user_info_url)
+				else:
+					raise
 			if user_info_before and user_info_before.get('success'):
 				print(user_info_before['display'])
 				break
@@ -761,7 +779,12 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 				print(user_info_before.get('error', 'Unknown error'))
 
 		if provider_config.needs_manual_check_in():
-			success = execute_check_in(client, account_name, provider_config, headers)
+			result = execute_check_in(client, account_name, provider_config, headers)
+			# Turnstile 验证要求：回退到 Playwright 浏览器
+			if result == 'turnstile':
+				client.close()
+				return await check_in_with_playwright(account, account_name, provider_config)
+			success = bool(result)
 			# 签到后再次获取用户信息，用于计算签到收益
 			user_info_after = get_user_info(client, headers, user_info_url)
 			return success, user_info_before, user_info_after
@@ -772,8 +795,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			return True, user_info_before, user_info_after
 
 	except Exception as e:
-		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
-		return False, None, None
+		error_msg = str(e)[:100]
+		print(f'[FAILED] {account_name}: Error occurred during check-in process - {error_msg}')
+		return False, {'success': False, 'error': error_msg}, None
 	finally:
 		client.close()
 
@@ -881,7 +905,13 @@ async def main():
 					'success': success,
 					'error_message': None
 					if success
-					else (user_info_after.get('error') if user_info_after else 'Unknown error'),
+					else (
+						user_info_after.get('error')
+						if user_info_after
+						else user_info_before.get('error')
+						if user_info_before
+						else 'Unknown error'
+					),
 				}
 
 		except Exception as e:
