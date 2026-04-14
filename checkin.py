@@ -378,6 +378,72 @@ def _parse_user_info_json(data: dict) -> dict:
 	return {'success': False, 'error': 'API returned success=false'}
 
 
+async def _solve_turnstile_in_page(page, domain: str, timeout_ms: int = 30000) -> str | None:
+	"""在 Playwright 页面中渲染并解决 Turnstile 挑战，返回 token。"""
+	try:
+		# 注入一个隐藏的 Turnstile widget 并等待其自动解决
+		token = await page.evaluate(
+			"""async (timeoutMs) => {
+				// 查找已有的 turnstile response
+				const existing = document.querySelector('[name="cf-turnstile-response"]');
+				if (existing && existing.value) return existing.value;
+
+				// 尝试通过 turnstile API 获取
+				if (window.turnstile) {
+					const widgets = document.querySelectorAll('.cf-turnstile');
+					for (const w of widgets) {
+						const id = w.getAttribute('data-widget-id') || w.id;
+						if (id) {
+							const resp = window.turnstile.getResponse(id);
+							if (resp) return resp;
+						}
+					}
+				}
+
+				// 找到 sitekey 并手动渲染
+				const siteKeyMeta = document.querySelector('meta[name="turnstile-site-key"]');
+				const siteKey = siteKeyMeta ? siteKeyMeta.content : null;
+
+				if (!siteKey && !window.turnstile) return null;
+
+				if (siteKey && window.turnstile) {
+					return new Promise((resolve, reject) => {
+						const div = document.createElement('div');
+						div.style.position = 'fixed';
+						div.style.bottom = '0';
+						div.style.right = '0';
+						document.body.appendChild(div);
+						const timer = setTimeout(() => reject('timeout'), timeoutMs);
+						window.turnstile.render(div, {
+							sitekey: siteKey,
+							callback: (token) => { clearTimeout(timer); resolve(token); }
+						});
+					});
+				}
+
+				// 等待已有 widget 自动解决
+				return new Promise((resolve, reject) => {
+					const timer = setTimeout(() => reject('timeout'), timeoutMs);
+					const check = setInterval(() => {
+						const el = document.querySelector('[name="cf-turnstile-response"]');
+						if (el && el.value) {
+							clearInterval(check);
+							clearTimeout(timer);
+							resolve(el.value);
+						}
+					}, 500);
+				});
+			}""",
+			timeout_ms,
+		)
+		if token:
+			print(f'[SUCCESS] Turnstile token obtained ({len(token)} chars)')
+		return token
+	except Exception as e:
+		print(f'[WARN] Turnstile solve failed: {str(e)[:80]}')
+		return None
+
+
 async def check_in_with_playwright(
 	account: AccountConfig,
 	account_name: str,
@@ -504,6 +570,44 @@ async def check_in_with_playwright(
 							if any(kw in str(error_msg).lower() for kw in already_checked_keywords):
 								print(f'[SUCCESS] {account_name}: Already checked in today')
 								success = True
+							elif 'turnstile' in str(error_msg).lower():
+								# Turnstile 验证：在页面中获取 token 并重试
+								print(f'[INFO] {account_name}: Turnstile required, solving in browser...')
+								turnstile_token = await _solve_turnstile_in_page(page, provider_config.domain)
+								if turnstile_token:
+									retry_result = await page.evaluate(
+										"""async ([path, key, user, token]) => {
+											const headers = {
+												'Content-Type': 'application/json',
+												'X-Requested-With': 'XMLHttpRequest',
+												[key]: user
+											};
+											try {
+												const r = await fetch(path, {
+													method: 'POST',
+													headers,
+													body: JSON.stringify({turnstile: token})
+												});
+												const status = r.status;
+												let body;
+												try { body = await r.json(); } catch(e) { body = {_raw: await r.text()}; }
+												return {status, body};
+											} catch(e) { return {status: 0, body: {error: e.message}}; }
+										}""",
+										[NEW_API_CHECKIN_PATH, api_user_key, api_user, turnstile_token],
+									)
+									retry_body = retry_result.get('body', {})
+									retry_msg = retry_body.get('msg', retry_body.get('message', ''))
+									if retry_body.get('ret') == 1 or retry_body.get('code') == 0 or retry_body.get('success'):
+										print(f'[SUCCESS] {account_name}: Check-in successful (with Turnstile)!')
+										success = True
+									elif any(kw in str(retry_msg).lower() for kw in already_checked_keywords):
+										print(f'[SUCCESS] {account_name}: Already checked in today')
+										success = True
+									else:
+										print(f'[FAILED] {account_name}: Check-in with Turnstile failed - {retry_msg}')
+								else:
+									print(f'[FAILED] {account_name}: Failed to solve Turnstile')
 							else:
 								print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
 					else:
@@ -752,16 +856,19 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			try:
 				user_info_before = get_user_info(client, headers, user_info_url)
 			except Exception as e:
-				# SSL 证书错误：重建 client 跳过证书验证
-				if 'CERTIFICATE_VERIFY_FAILED' in str(e) and ssl_verify:
-					print(f'[WARN] {account_name}: SSL certificate error, retrying without verification')
-					client.close()
-					client = httpx.Client(http2=True, timeout=30.0, verify=False)
-					client.cookies.update(all_cookies)
-					ssl_verify = False
-					user_info_before = get_user_info(client, headers, user_info_url)
-				else:
-					raise
+				user_info_before = {'success': False, 'error': str(e)[:100]}
+			# SSL 证书错误：重建 client 跳过证书验证
+			if (
+				not user_info_before.get('success')
+				and ssl_verify
+				and 'CERTIFICATE_VERIFY_FAILED' in str(user_info_before.get('error', ''))
+			):
+				print(f'[WARN] {account_name}: SSL certificate error, retrying without verification')
+				client.close()
+				client = httpx.Client(http2=True, timeout=30.0, verify=False)
+				client.cookies.update(all_cookies)
+				ssl_verify = False
+				user_info_before = get_user_info(client, headers, user_info_url)
 			if user_info_before and user_info_before.get('success'):
 				print(user_info_before['display'])
 				break
@@ -796,6 +903,28 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	except Exception as e:
 		error_msg = str(e)[:100]
+		# SSL 证书错误：用 verify=False 重试整个流程
+		if 'CERTIFICATE_VERIFY_FAILED' in error_msg and ssl_verify:
+			print(f'[WARN] {account_name}: SSL certificate error during check-in, retrying without verification')
+			client.close()
+			client = httpx.Client(http2=True, timeout=30.0, verify=False)
+			client.cookies.update(all_cookies)
+			try:
+				if provider_config.needs_manual_check_in():
+					result = execute_check_in(client, account_name, provider_config, headers)
+					if result == 'turnstile':
+						client.close()
+						return await check_in_with_playwright(account, account_name, provider_config)
+					success = bool(result)
+					user_info_after = get_user_info(client, headers, user_info_url)
+					return success, user_info_before, user_info_after
+				else:
+					user_info_after = get_user_info(client, headers, user_info_url)
+					return True, user_info_before, user_info_after
+			except Exception as e2:
+				error_msg = str(e2)[:100]
+			print(f'[FAILED] {account_name}: Error occurred during check-in process - {error_msg}')
+			return False, {'success': False, 'error': error_msg}, None
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {error_msg}')
 		return False, {'success': False, 'error': error_msg}, None
 	finally:
